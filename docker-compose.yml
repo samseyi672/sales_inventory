@@ -1,0 +1,182 @@
+version: '3.7'
+services:
+  ## Zipkin
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - digitalis
+
+  ## Eureka Server
+  discovery-server:
+    container_name: discovery-server
+    build:
+      context: ./minty/minty/Discoveryserver
+      dockerfile: ./Dockerfile.layered
+    restart: always
+    ports:
+      - "8761:8761"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    depends_on:
+      - zipkin
+    networks:
+      - digitalis
+
+  mysqldb:
+    image: 'mysql:8.0'
+    restart: always
+    ports:
+      - "3308:3306"
+    volumes:
+      - ./db:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: jetstoredb
+      MYSQL_ROOT_PASSWORD: root #the containers will see eachother bcos they are inside the same networks
+      MYSQL_PASSWORD: root
+    networks:
+      - digitalis
+
+  api-gateway:
+    build:
+      context: ./minty/minty/ApiGateway
+      dockerfile: ./Dockerfile.layered
+    container_name: api-gateway
+    restart: always
+    ports:
+      - "7073:7073"
+    expose:
+      - "8181"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_SECURITY= TRACE
+    depends_on:
+      - zipkin
+      - discovery-server
+    networks:
+      - digitalis
+
+  zookeeper:
+    image: docker.io/bitnami/zookeeper:3.8
+    container_name: zookeeper
+    restart: always
+    networks:
+      - digitalis
+    ports:
+      - "2181:2181"
+    #   Might be problematic if used, especially on Windows
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+  ## sales-Service Docker Compose Config
+  report-service:
+    container_name: report-service
+    build:
+      context: ./minty/minty/ReportApplication_Consumer
+      dockerfile: ./Dockerfile.layered
+    restart: always
+    ports:
+      - "7074:7074"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysqldb:3306/mintydb?createDatabaseIfNotExists=true&autoReconnect=true&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: "root"
+      SPRING_DATASOURCE_PASSWORD: "root"
+      SPRING_APPLICATION_JSON: '{
+             "initialization-mode": "always",
+             "spring.datasource.driver-class-name": "com.mysql.cj.jdbc.Driver",
+             "spring.jpa.properties.hibernate.dialect" : "org.hibernate.dialect.MySQL8Dialect",
+              "spring.jpa.hibernate.ddl-auto" : "create"
+                }'
+    depends_on:
+      - discovery-server
+      - api-gateway
+      - mysqldb
+    links:
+      - mysqldb
+    volumes:
+      - ./fileandimages:/fileandimages
+    networks:
+      - digitalis
+
+  sales-service:
+    container_name: sales-service
+    build:
+      context: ./minty/minty/SalesOrInventoryApp
+      dockerfile: ./Dockerfile.layered
+    restart: always
+    ports:
+      - "7076:7076"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysqldb:3306/mintydb?createDatabaseIfNotExists=true&autoReconnect=true&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: "root"
+      SPRING_DATASOURCE_PASSWORD: "root"
+      SPRING_APPLICATION_JSON: '{
+             "initialization-mode": "always",
+             "spring.datasource.driver-class-name": "com.mysql.cj.jdbc.Driver",
+             "spring.jpa.properties.hibernate.dialect" : "org.hibernate.dialect.MySQL8Dialect",
+              "spring.jpa.hibernate.ddl-auto" : "update"
+                }'
+    #       SPRING_REDIS_HOST: cache
+    #       SPRING_REDIS_PORT: 6379
+    depends_on:
+      - discovery-server
+      - api-gateway
+      - mysqldb
+    links:
+      - mysqldb
+    volumes:
+      - ./fileandimages:/fileandimages
+    networks:
+      - digitalis
+
+  kafka:
+    image: docker.io/bitnami/kafka:3
+    container_name: kafka
+    restart: always
+#    networks:
+#      - digitalis
+    ports:
+      - "9092:9092"
+    #   Might be problematic if used, especially on Windows
+    #    volumes:
+    #      - "./data/kafka-data:/bitnami"
+    environment:
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: DOCKER_INTERNAL:PLAINTEXT,DOCKER_EXTERNAL:PLAINTEXT
+      KAFKA_CFG_LISTENERS: DOCKER_INTERNAL://:29092,DOCKER_EXTERNAL://:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: DOCKER_INTERNAL://kafka:29092,DOCKER_EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9092
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: DOCKER_INTERNAL
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CFG_BROKER_ID: 1
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 100
+    depends_on:
+      - zookeeper
+    networks:
+      - digitalis
+
+  ## Prometheus for reporting and monitoring
+  prometheus:
+    image: prom/prometheus:v2.37.1
+    container_name: prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - sales-service
+    networks:
+      - digitalis
+
+networks:
+    digitalis:
+volumes:
+  fileandimages:
+  db:
